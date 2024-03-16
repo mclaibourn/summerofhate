@@ -1,0 +1,605 @@
+---
+title: "Summer of Hate: Replication"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+date: "July 2023"
+---
+
+```{r initial, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r setup}
+# Set up ----
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(readxl)
+library(MASS)
+library(broom)
+library(kableExtra)
+library(modelsummary)
+
+allvisits <- read_csv("data/All ED VISITS RECODED.csv") %>% 
+  clean_names()
+```
+
+Initially, I sought to replicate the analysis to check my understanding of the data and approach.
+
+# 1. Day-level analysis
+
+The first test looks at the number of visits among Black and White patients by day for the three months leading up to and the three months following August 12, 2017 (on pages 125-127). Calculating these and estimating the model $Y = \beta_0 + \beta_1 Period + \beta_2 Race + \beta_3 Period \times Race$ generates the following:
+
+```{r test1a}
+daily_2017 <- allvisits %>% 
+  filter(race_clean %in% c("Black", "White")) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n()) %>% 
+  filter(between(adm_dtm, ymd(20170514), ymd(20171111))) %>% 
+  mutate(post = ifelse(adm_dtm >= ymd(20170812), "post", "pre"),
+         post = as.factor(post),
+         race = factor(race_clean, levels = c("White", "Black")),
+         postweek = case_when(
+           adm_dtm < ymd(20170812) ~ "pre",
+           adm_dtm > ymd(20170825) ~ "postlater",
+           TRUE ~ "post2weeks"
+         ),
+         postweek = as.factor(postweek))
+
+day1 <- lm(num_visits ~ post*race,
+           data = daily_2017)
+
+tidy(day1) %>%
+  kbl() %>% 
+  kable_styling(full_width = FALSE)
+```
+The linear model version nearly exactly replicates the results provided in the chapter.
+
+Shown as a ANOVA
+```{r test1b}
+daily_2017 %>% 
+  group_by(post, race) %>%
+  summarise(
+    mean = mean(num_visits, na.rm = TRUE),
+    sd = sd(num_visits, na.rm = TRUE)
+  ) %>% 
+kbl() %>% 
+  kable_styling(full_width = FALSE)
+
+# anova version
+day1_aov <- aov(num_visits ~ post + race + post*race,
+                data = daily_2017)
+
+tidy(day1_aov) %>% 
+   kbl() %>% 
+   kable_styling(full_width = FALSE)
+```
+Again, nearly exactly replicating the results (the F value for race is very slightly different).
+
+### Compare to 2016/2018
+Comparing the same model run on the 2016 and 2018 data; I wanted to understand if the same patterns appeared in the adjacent years.
+
+```{r comparea}
+daily_2016 <- allvisits %>% 
+  filter(race_clean %in% c("Black", "White")) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n()) %>% 
+  filter(between(adm_dtm, ymd(20160514), ymd(20161111))) %>% 
+  mutate(post = ifelse(adm_dtm >= ymd(20160812), "post", "pre"),
+         post = as.factor(post),
+         race = factor(race_clean, levels = c("White", "Black")),
+         postweek = case_when(
+           adm_dtm < ymd(20160812) ~ "pre",
+           adm_dtm > ymd(20160825) ~ "postlater",
+           TRUE ~ "post2weeks"
+         ),
+         postweek = as.factor(postweek))
+
+day2 <- lm(num_visits ~ post + race + post*race,
+           data = daily_2016)
+
+daily_2018 <- allvisits %>% 
+  filter(race_clean %in% c("Black", "White")) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n()) %>% 
+  filter(between(adm_dtm, ymd(20180514), ymd(20181111))) %>% 
+  mutate(post = ifelse(adm_dtm >= ymd(20180812), "post", "pre"),
+         post = as.factor(post),
+         race = factor(race_clean, levels = c("White", "Black")),
+         postweek = case_when(
+           adm_dtm < ymd(20180812) ~ "pre",
+           adm_dtm > ymd(20180825) ~ "postlater",
+           TRUE ~ "post2weeks"
+         ),
+         postweek = as.factor(postweek))
+
+day3 <- lm(num_visits ~ post + race + post*race,
+           data = daily_2018)
+
+modelsummary(list("2017" = day1,
+                  "2016" = day2,
+                  "2018" = day3),
+             stars = TRUE,
+             gof_map = c("nobs", "r.squared", "rmse"))
+```
+
+The results in 2016 look very similar to those in 2017 -- a post-8/12 increase among White patients that is not present among Black patients. The 2018 observations show no pattern.
+
+
+### Shift to count model
+Estimating the same model using a count regression (negative binomial), appropriate for countable outcomes rather than continuous outcomes.
+
+```{r negbin1}
+day1_nb <- glm.nb(num_visits ~ post*race,
+           data = daily_2017)
+day2_nb <- glm.nb(num_visits ~ post + race + post*race,
+           data = daily_2016)
+day3_nb <- glm.nb(num_visits ~ post + race + post*race,
+           data = daily_2018)
+
+modelsummary(list("2017" = day1_nb,
+                  "2016" = day2_nb,
+                  "2018" = day3_nb),
+             stars = TRUE,
+             gof_map = c("nobs", "rmse"))
+```
+
+This model generates the same predictions (the mean count for Black and White in the pre and post periods), but more appropriately accounts for the fact that the observation cannot be less than 0 and uses a binomial for the model of error (rather than a normal distribution -- when the mean is large, the binomial look like a normal; when the mean is small, the binomal looks like a right-skewed distribution, that is, with a peak closer to zero and a longer tail to the right).
+
+## Visualizing the day-level trends
+I wanted to see the daily counts by race to better understand the temporal dynamics, first as the count of all visits (as modeled above).
+
+```{r vis_count}
+daily_all <- bind_rows(daily_2016, daily_2017, daily_2018) %>% 
+  mutate(monthday = format(as.Date(adm_dtm), "%m-%d"),
+         year = year(adm_dtm))
+
+daily_all %>% filter(year == 2017) %>% 
+  ggplot(aes(x = monthday, y = num_visits, group = 1)) +
+  geom_line() +
+  geom_smooth(span = 0.2, se = FALSE) +
+  geom_vline(xintercept = "08-12") +
+  facet_wrap(~race, scales = "free_y", ncol = 1) +
+  labs(title = "Count of All Visits")
+```
+
+Then as the count of only admits for the three relevant diagnoses. Given the argument around the impact of the summer of hate, my initial thinking was that the count of primary interest was of the MUPS, anxiety, and alcohol related diagnoses.
+
+```{r vis_relevant}
+daily_2017_diag <- allvisits %>% 
+  mutate(diag = ifelse(anx_dep == 1 | mups1 == 1 | alcohol == 1,
+                       1, 0)) %>% 
+  filter(race_clean %in% c("Black", "White"),
+         diag == 1) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n()) %>% 
+  filter(between(adm_dtm, ymd(20170514), ymd(20171111))) %>% 
+  mutate(post = ifelse(adm_dtm >= ymd(20170812), "post", "pre"),
+         post = as.factor(post),
+         race = factor(race_clean, levels = c("White", "Black")),
+         postweek = case_when(
+           adm_dtm < ymd(20170812) ~ "pre",
+           adm_dtm > ymd(20170825) ~ "postlater",
+           TRUE ~ "post2weeks"
+         ),
+         postweek = as.factor(postweek))
+
+daily_2016_diag <- allvisits %>% 
+  mutate(diag = ifelse(anx_dep == 1 | mups1 == 1 | alcohol == 1,
+                       1, 0)) %>% 
+  filter(race_clean %in% c("Black", "White"),
+         diag == 1) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n()) %>% 
+  filter(between(adm_dtm, ymd(20160514), ymd(20161111))) %>% 
+  mutate(post = ifelse(adm_dtm >= ymd(20160812), "post", "pre"),
+         post = as.factor(post),
+         race = factor(race_clean, levels = c("White", "Black")),
+         postweek = case_when(
+           adm_dtm < ymd(20160812) ~ "pre",
+           adm_dtm > ymd(20160825) ~ "postlater",
+           TRUE ~ "post2weeks"
+         ),
+         postweek = as.factor(postweek))
+
+daily_2018_diag <- allvisits %>% 
+  mutate(diag = ifelse(anx_dep == 1 | mups1 == 1 | alcohol == 1,
+                       1, 0)) %>% 
+  filter(race_clean %in% c("Black", "White"),
+         diag == 1) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n()) %>% 
+  filter(between(adm_dtm, ymd(20180514), ymd(20181111))) %>% 
+  mutate(post = ifelse(adm_dtm >= ymd(20180812), "post", "pre"),
+         post = as.factor(post),
+         race = factor(race_clean, levels = c("White", "Black")),
+         postweek = case_when(
+           adm_dtm < ymd(20180812) ~ "pre",
+           adm_dtm > ymd(20180825) ~ "postlater",
+           TRUE ~ "post2weeks"
+         ),
+         postweek = as.factor(postweek))
+
+daily_all_diag <- bind_rows(daily_2016_diag, daily_2017_diag, daily_2018_diag) %>% 
+  mutate(monthday = format(as.Date(adm_dtm), "%m-%d"),
+         year = year(adm_dtm))
+
+daily_all_diag %>% filter(year == 2017) %>% 
+  ggplot(aes(x = monthday, y = num_visits, group = 1)) +
+  geom_line() +
+  geom_smooth(span = 0.2, se = FALSE) +
+  geom_vline(xintercept = "08-12") +
+  facet_wrap(~race, scales = "free_y", ncol = 1) +
+  labs(title = "Count of Visits with Relevant Diagnoses")
+```
+
+Finally as the percent of admits for relevant diagnoses. These last two mirror, to some extent, the "syndromic surveillance" of the Stephens' paper.
+
+```{r vis_percent}
+daily_2017_perc <- daily_2017 %>% 
+  left_join(daily_2017_diag %>% 
+              rename(num_diag_visits = num_visits)) %>% 
+  mutate(perc_diag = (num_diag_visits/num_visits)*100)
+
+daily_2016_perc <- daily_2016 %>% 
+  left_join(daily_2016_diag %>% 
+              rename(num_diag_visits = num_visits)) %>% 
+  mutate(perc_diag = (num_diag_visits/num_visits)*100)
+
+daily_2018_perc <- daily_2018 %>% 
+  left_join(daily_2018_diag %>% 
+              rename(num_diag_visits = num_visits)) %>% 
+  mutate(perc_diag = (num_diag_visits/num_visits)*100)
+
+daily_all_perc <- bind_rows(daily_2016_perc, daily_2017_perc, daily_2018_perc) %>% 
+  mutate(monthday = format(as.Date(adm_dtm), "%m-%d"),
+         year = year(adm_dtm))
+
+daily_all_perc %>% filter(year == 2017) %>% 
+  ggplot(aes(x = monthday, y = perc_diag, group = 1)) +
+  geom_line() +
+  geom_smooth(span = 0.2, se = FALSE) +
+  geom_vline(xintercept = "08-12") +
+  facet_wrap(~race, scales = "free_y", ncol = 1) +
+  labs(title = "Percent of All Visits with Relevant Diagnoses")
+
+```
+
+And, for completeness, here are the same figures with lines for each of the three years.
+
+```{r vis_all_count}
+daily_all %>% 
+  ggplot(aes(x = monthday, y = num_visits, 
+             color = as.factor(year), group = as.factor(year))) +
+  geom_line() +
+  geom_smooth(span = 0.2, se = FALSE) +
+  geom_vline(xintercept = "08-12") +
+  facet_wrap(~race, scales = "free_y", ncol = 1) +
+  labs(title = "Count of All Visits", color = "Year") +
+  theme(legend.position = c(0.2, 0.95), legend.direction = "horizontal")
+
+```
+
+
+```{r vis_all_diag}
+daily_all_diag %>% 
+  ggplot(aes(x = monthday, y = num_visits, 
+             color = as.factor(year), group = as.factor(year))) +
+  geom_line() +
+  geom_smooth(span = 0.2, se = FALSE) +
+  geom_vline(xintercept = "08-12") +
+  facet_wrap(~race, scales = "free_y", ncol = 1) +
+  labs(title = "Count of Visits with Relevant Diagnoses", color = "Year") +
+  theme(legend.position = c(0.2, 0.95), legend.direction = "horizontal")
+
+```
+
+
+```{r vis_perc_diag}
+daily_all_perc %>% 
+  ggplot(aes(x = monthday, y = perc_diag, 
+             color = as.factor(year), group = as.factor(year))) +
+  geom_line() +
+  geom_smooth(span = 0.2, se = FALSE) +
+  geom_vline(xintercept = "08-12") +
+  facet_wrap(~race, scales = "free_y", ncol = 1) +
+  labs(title = "Percent of All Visits with Relevant Diagnoses", color = "Year") +
+  theme(legend.position = c(0.2, 0.95), legend.direction = "horizontal")
+```
+
+## Next steps on day-level analysis
+Given the above visuals and the next analyses on individual-level data, the above analyses seemed somewhat out of step with the expected outcomes. That is, the argument isn't that the impact will persist for three months, but will be more immediate; that while the true health impacts may have a longer duration, the observable impact on hospital visits (for these diagnoses) is not expected to remain high for the full three month period.
+
+To accommodate this, I repeated the above models with a three-epoch variable -- pre-8/12, the immediate post-8/12 period, and the later post-8/12 period. First, I wanted to understand if the first several weeks post-8/12 were notably different.
+
+```{r weeks1to3}
+## initial period of 1 versus 2 versus 3 weeks
+## for relevant diagnoses
+daily_2017_diag_1week <- allvisits %>% 
+  mutate(diag = ifelse(anx_dep == 1 | mups1 == 1 | alcohol == 1,
+                       1, 0)) %>% 
+  filter(race_clean %in% c("Black", "White"),
+         diag == 1) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n()) %>% 
+  filter(between(adm_dtm, ymd(20170514), ymd(20171111))) %>% 
+  mutate(post = ifelse(adm_dtm >= ymd(20170812), "post", "pre"),
+         post = as.factor(post),
+         race = factor(race_clean, levels = c("White", "Black")),
+         postweek = case_when(
+           adm_dtm < ymd(20170812) ~ "pre",
+           adm_dtm >= ymd(20170812) & adm_dtm < ymd(20170819) ~ "week1",
+           adm_dtm >= ymd(20170819) & adm_dtm < ymd(20170826) ~ "week2",
+           adm_dtm >= ymd(20170826) & adm_dtm < ymd(20170902) ~ "week3",
+           adm_dtm >= ymd(20170902) & adm_dtm < ymd(20170909) ~ "week4",
+           adm_dtm >= ymd(20170909) & adm_dtm < ymd(20170916) ~ "week5",
+           adm_dtm >= ymd(20170916) & adm_dtm < ymd(20170923) ~ "week6",
+           adm_dtm >= ymd(20170923) ~ "post"
+         ),
+         postweek = as.factor(postweek))
+
+day1_weeks_all <- lm(num_visits ~ postweek,
+                     data = daily_2017_diag_1week)
+
+day1_weeks_race <- lm(num_visits ~ postweek*race,
+                 data = daily_2017_diag_1week)
+
+modelsummary(day1_weeks_race,
+             stars = TRUE,
+             gof_map = c("nobs", "r.squared", "rmse"))
+
+```
+
+Almost all of the dynamics are among White patients -- the interactive effects for race and period show essentially offsetting effects for Black patients. That is, while the average visit for a relevant diagnoses among White patient ranges across these periods (going up in week 2, falling back to the pre-mean in weeks 3 and 4, and rising again in weeks 5 and 6), the period effects for Black patients  are significant only when the period effects are signification for White patients, but in the opposite direction. 
+
+## Recommended day-level analysis
+
+Given this, and the initial findings from this section, I'd argue the best use of this analysis is to really set up the individual level analysis to follow. Use the equivalent 2-week period to establish the divergence of White and Black patients in the immediate aftermath. In this case, it feels like overkill to do to much more with the daily aggregated data beyond a visual (either just 2017 or comparing years) and a model (either of just 2017 or comparing all years). E.g., a count model of the number of patient visits with the relevant diagnoses by race in the pre-period, initial two weeks, and later periods, like below. In short, this section could be framed as more descriptive, motivating the community interpretations and the subsequent expectations.
+
+```{r negbin2}
+day1_diag_nb <- glm.nb(num_visits ~ postweek*race,
+                   data = daily_2017_diag)
+
+day2_diag_nb <- glm.nb(num_visits ~ postweek*race,
+                   data = daily_2016_diag)
+
+day3_diag_nb <- glm.nb(num_visits ~postweek*race,
+                   data = daily_2018_diag)
+
+modelsummary(list("2017" = day1_diag_nb,
+                  "2016" = day2_diag_nb,
+                  "2018" = day3_diag_nb),
+             stars = TRUE,
+             gof_map = c("nobs", "rmse"))
+
+```
+
+With predicted counts for ease of interpretation
+
+```{r predict}
+## predictions for negative binomial
+preddata <- crossing(postweek = c("pre", "post2weeks", "postlater"), race = c("Black", "White"))
+
+preddata <- preddata %>% 
+  mutate(postweek = factor(postweek, levels = c("pre", "post2weeks", "postlater")),
+         race = factor(race))
+
+preddata$phat <- predict(day1_diag_nb, preddata, type = "response")
+
+ggplot(preddata, aes(x = postweek, y = phat, color = race, group = race)) + 
+  geom_point() +
+  geom_line() +
+  scale_y_continuous(limits = c(0,40)) +
+  scale_color_manual(values = c("#00bfc4", "#f8766d")) +
+  labs(y = "Predicted Number of Visits\n for Select Diagnoses",
+       x = "Period Relative to 8/12/2017") +
+  annotate("text", x = 3.25, y = c(26.6, 8.8), 
+           label = c("White", "Black"), color = c("#f8766d", "#00bfc4")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+```
+
+In the context of the advisory committee's knowledge, counting the number of Black patients at UVA can't adequately address questions of prevalence in the region. What the data can address is something like: given a patient has gone to UVA (and we know that many won't), what is the propensity for these diagnoses? While events like the summer of hate may push some patients away from treatment at UVA, such events can still have an impact on what the patients that do present are experiencing. And that's the core question to be addressed by the next analysis. 
+
+
+# 2. Individual level analysis
+
+The second, and central, test looks at the likelihood that patients who select into UVA have a diagnoses in the relevant domains (anxiety/depression, MUPS, alcohol related), comparing patient visits in the two weeks prior to and subsequent to August 12, 2017 (with tests of other windows). The relevant model (pages 126-129) is $Prob(Y = 1) = \beta_0 + \beta_1 Period + \beta_2 Day + \beta_3 Race + \beta_4 Period \times Day + \beta_5 Period \times Race + \beta_6 Day \times Period \times Race$ with controls for age, sex, and an indicator for whether the day is on a weekend.
+
+Estimating that model (as a linear probability model) for each of the relevant diagnoses generates:
+
+The values are not the same as those presented in the chapter, though the patterns for signs and significance are the same. 
+
+### MUPS
+
+```{r mups}
+## mups ----
+by_year_race_mups <- allvisits %>% 
+  # keep only patients categorized as Black or White
+  filter(race_clean %in% c("Black", "White")) %>% 
+  # keep only cases within 2 weeks of 8/12
+  filter(between(adm_dtm, ymd(20170730), ymd(20170826)) |
+           between(adm_dtm, ymd(20160730), ymd(20160826)) |
+           between(adm_dtm, ymd(20180730), ymd(20180826))) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(race = factor(race_clean, levels = c("Black", "White")),
+         days = case_when(
+           adm_year == 2016 ~ abs(adm_dtm - ymd(20160812)),
+           adm_year == 2017 ~ abs(adm_dtm - ymd(20170812)),
+           adm_year == 2018 ~ abs(adm_dtm - ymd(20180812))
+         ),
+         weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                          "weekend", "weekday")
+  ) %>% 
+  # nest by year, race to run models separately on each subset
+  group_by(adm_year, race) %>% 
+  nest()
+
+# Define model
+model1 <- function(df) {
+  lm(mups1 ~ age_at_event + sex + weekend + pre_post_yearly*days, data = df)
+}
+
+# Run model
+by_year_race_mups <- by_year_race_mups %>% 
+  mutate(model = map(data, model1))
+
+# View results
+by_year_race_mups %>%
+  arrange(adm_year, race) %>% 
+  mutate(tidied = map(model, tidy)) %>% 
+  dplyr::select(adm_year, race, tidied) %>% 
+  unnest(tidied) %>% 
+  filter(term %in% c("pre_post_yearly", "days", "pre_post_yearly:days")) %>% 
+  kbl() %>% 
+  kable_styling() %>% 
+  row_spec(c(1:3,7:9,13:15), background = "lightgray")
+```
+
+### Alcohol
+
+```{r alc}
+## alcohol ----
+by_year_race_alc <- allvisits %>% 
+  # keep only patients categorized as Black or White
+  filter(race_clean %in% c("Black", "White")) %>% 
+  # keep only cases within 2 weeks of 8/12
+  filter(between(adm_dtm, ymd(20170730), ymd(20170826)) |
+           between(adm_dtm, ymd(20160730), ymd(20160826)) |
+           between(adm_dtm, ymd(20180730), ymd(20180826))) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(race = factor(race_clean, levels = c("Black", "White")),
+         days = case_when(
+           adm_year == 2016 ~ abs(adm_dtm - ymd(20160812)),
+           adm_year == 2017 ~ abs(adm_dtm - ymd(20170812)),
+           adm_year == 2018 ~ abs(adm_dtm - ymd(20180812))
+         ),
+         weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                          "weekend", "weekday")
+  ) %>% 
+  # nest by year, race to run models separately on each subset
+  group_by(adm_year, race) %>% 
+  nest()
+
+# Define model
+model2 <- function(df) {
+  lm(alcohol ~ age_at_event + sex + weekend +pre_post_yearly*days, data = df)
+}
+
+# Run model
+by_year_race_alc <- by_year_race_alc %>% 
+  mutate(model = map(data, model2))
+
+# View results
+by_year_race_alc %>%
+  arrange(adm_year, race) %>% 
+  mutate(tidied = map(model, tidy)) %>% 
+  dplyr::select(adm_year, race, tidied) %>% 
+  unnest(tidied) %>% 
+  filter(term %in% c("pre_post_yearly", "days", "pre_post_yearly:days")) %>% 
+  kbl() %>% 
+  kable_styling() %>% 
+  row_spec(c(1:3,7:9,13:15),background = "lightgray")
+```
+
+### Anxiety/depression
+
+```{r anx}
+## anxiety-depression ----
+by_year_race_anx <- allvisits %>% 
+  # keep only patients categorized as Black or White
+  filter(race_clean %in% c("Black", "White")) %>% 
+  # keep only cases within 2 weeks of 8/12
+  filter(between(adm_dtm, ymd(20170730), ymd(20170826)) |
+           between(adm_dtm, ymd(20160730), ymd(20160826)) |
+           between(adm_dtm, ymd(20180730), ymd(20180826))) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(race = factor(race_clean, levels = c("Black", "White")),
+         days = case_when(
+           adm_year == 2016 ~ abs(adm_dtm - ymd(20160812)),
+           adm_year == 2017 ~ abs(adm_dtm - ymd(20170812)),
+           adm_year == 2018 ~ abs(adm_dtm - ymd(20180812))
+         ),
+         weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                          "weekend", "weekday")
+  ) %>% 
+  # nest by year, race to run models separately on each subset
+  group_by(adm_year, race) %>% 
+  nest()
+
+# Define model
+model3 <- function(df) {
+  lm(anx_dep ~ age_at_event + sex + weekend +pre_post_yearly*days, data = df)
+}
+
+# Run model
+by_year_race_anx <- by_year_race_anx %>% 
+  mutate(model = map(data, model3))
+
+# View results
+by_year_race_anx %>%
+  arrange(adm_year, race) %>% 
+  mutate(tidied = map(model, tidy)) %>% 
+  dplyr::select(adm_year, race, tidied) %>% 
+  unnest(tidied) %>% 
+  filter(term %in% c("pre_post_yearly", "days", "pre_post_yearly:days")) %>% 
+  kbl() %>% 
+  kable_styling() %>% 
+  row_spec(c(1:3,7:9,13:15),background = "lightgray")
+
+```
+
+I'm not what's causing the differences. 
+
+
+### Next steps on individual analysis
+
+1. Switch to logit model
+2. 2017 model with local/not local -- set this up as a single model to leverage both distance in time and space as quasi-experimental elements.
+  - Question on what constitutes local: currently the location variable includes only 22901, 22902, 22903, 22905, 22906, 22908, 22910; these are primarily Charlottesville zip codes. Should Albemarle, or those in the urban periphery of Charlottesville, also be included?
+3. Model with all years and interactions (consider for local only?) -- formalize the across-year difference as a test of.
+4. Visualize relevant effects
+5. Generate robustness table of other window for appendix
+
+## Remaining question
+
+A check on diagnoses/ICD 10 codes. There are more codes included within each diagnoses than indicated in the appendix. 
+
+* For anxiety/depression
+
+```{r icd_anx}
+# anxiety/depression
+allvisits %>% filter(anx_dep == 1) %>% 
+  distinct(icd_10_code) %>% arrange(icd_10_code) %>% 
+  print(n = 25)
+```
+
+The data also includes R07.89, R10.9, R11.2, R45.851, S69.81XA, Z41.8.
+
+* For MUPS
+
+```{r icd_mups}
+# mups
+allvisits %>% filter(mups1 == 1) %>% 
+  distinct(icd_10_code) %>% arrange(icd_10_code) %>% 
+  print(n = 15)
+```
+
+The data also includes G40.89
+
+* For Alcohol
+
+```{r icd_alc}
+# alcohol
+allvisits %>% filter(alcohol == 1) %>% 
+  distinct(icd_10_code) %>% arrange(icd_10_code) %>% 
+  print(n = 30)
+```
+
+The data also includes F10.159, F10.982
+
+

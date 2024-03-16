@@ -1,0 +1,467 @@
+---
+title: "Summer of Hate: Revised Analysis"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+date: "January 2024"
+---
+
+```{r initial, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r setup}
+# Set up ----
+## Libraries ----
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(broom)
+library(kableExtra)
+library(modelsummary)
+library(patchwork)
+
+## Data ----
+# read
+allvisits <- read_csv("data/All ED VISITS RECODED.csv") %>% 
+  clean_names()
+
+# update diagnostic codes for anxiety/depression
+allvisits <- allvisits %>% 
+  mutate(anx = ifelse(
+    icd_10_code %in% c("R07.89", "R10.9", "R11.2", "R45.851", "S69.81XA", "Z41.8"),
+    0, anx_dep))
+```
+
+## Results
+
+To examine the potential impact of the events of August 11th and 12th on community health, we examined the probability that a patient presenting in the ED in the weeks immediately preceding and following the events is diagnosed with MUPS or an Anxiety/Depression code. The analysis below uses a two-week window around the event, but the results are consistent with a one- or three-week span as well. While the events were shocking for the Charlottesville community at large, as acts of explicitly racial terror, we expect the effects to be felt most acutely among Black residents.
+
+Specifically, we estimate a logit model of the likelihood that a patient presenting in the ED is diagnosed with either a MUPS code or an Anxiety/Depression code as a function of period (Post) -- pre or post 8/11 and 12 -- race of the patient, the number of days from the events (Days, in absolute value), and the interaction of all three, along with controls for the age and sex of patients and the day of the week. That is,
+
+$$P(Y=1|X) = \beta_0 + \beta_1 Post + \beta_2 Race + \beta_3 Days + \\  \beta_4 Race \times Post + \beta_5 Days \times Post + \beta_6 Race \times Days \\ \beta_7 Race \times Post \times Days + \\ \beta_8 Age + \beta_9 Sex + \beta_10 Day\ of\ Week$$
+Where $\beta_1$ estimates the effect of the events on the likelihood that Black patients present to the UVA ED with one of the relevant diagnostic codes. $\beta_4$ similarly corresponds to whether any effect of the the August events are the same for White patients to the UVA ED. We estimate this model separately for MUPS diagnoses and anxiety or depression. The key results are presented in Table 1 and Figures 1 and 2 which plot the predicted probabilities of presenting to the ED with the targeted diagnoses by day around the events.
+
+
+Footnote: We initially considered a day-level analysis, in line with the VDH surveillance study. Such an analysis is complicated by two mechanisms. First, the start of the university's fall semester coincides closely with the events of August 11 and 12. Orientation began August 19th that year and the area sees an increase in predominantly White students, changing the underlying population. Second, the CAB advised that Black patients may select away from the university hospital in an area with two major health facilities, an effect that may be exacerbated after the university was perceived to have allowed white nationalists to rally on campus. We focus, instead, on the incidence of these diagnoses among patients presenting at the hospital rather than the prevalence of these diagnoses in the community. The impact among university hospital patients represents a minimum estimate for the community.
+
+```{r indlevel_prep}
+## 2017 model, time discontinuity by race (RDD) ----
+## key parameters: pre_post, pre_postXrace
+df_2017 <- allvisits %>% 
+  # keep only patients categorized as Black or White, only 2017
+  filter(race_clean %in% c("Black", "White"),
+         sex %in% c("Female", "Male"),
+         adm_year == 2017) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(black = ifelse(race_clean == "Black", 1, 0),
+         race = factor(race_clean, levels = c("Black", "White"), labels = c("Black Patients", "White Patients")),
+         days = adm_dtm - ymd(20170810),
+         pre_post = ifelse(days >= 0, "post", "pre"),
+         pre_post = factor(pre_post, levels = c("pre", "post")),
+         post = ifelse(days >= 0, 
+                       1,0),
+         absdays = abs(days),
+         female = ifelse(sex == "Female", 1, 0),
+         weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                          1,0),
+         day_of_week = wday(adm_dtm, label = TRUE)
+  ) %>% 
+  # keep only cases within 2 weeks of 8/11
+  filter(absdays < 15) 
+```
+
+```{r indlevel_analysis}
+### mups ----
+model_mups <- 
+  glm(mups1 ~ age_at_event + sex + day_of_week + 
+        race*pre_post*absdays, 
+      family = "binomial", data = df_2017)
+
+### anx ----
+model_anx <- 
+  glm(anx ~ age_at_event + sex + day_of_week + 
+        race*pre_post*absdays, 
+      family = "binomial", data = df_2017)
+
+### Tables ----
+modelsummary(list("MUPS" = model_mups, "Anxiety/Depression" = model_anx),
+             stars = TRUE,
+             coef_map = c("(Intercept)" = "Intercept",
+                          "pre_postpost" = "Post",
+                          "raceWhite Patients" = "White patients",
+                          "absdays" = "Days",
+                          "raceWhite Patients:pre_postpost" = "White patients x Post",
+                          "pre_postpost:absdays" = "Post x Days",
+                          "raceWhite Patients:absdsays" = "White patients x Days",
+                          "raceWhite Patients:pre_postpost:absdays" = "White patients x Post x Days"),
+             gof_map = c("nobs", "logLik"),
+             title = "Table 1")
+```
+
+```{r indlevel_visualize}
+### mups ----
+mean_pred_mups <- augment(model_mups, type.predict = "response", se_fit = TRUE, interval = "confidence")
+
+mean_pred_mups <- mean_pred_mups %>% 
+  mutate(days = ifelse(pre_post == "pre", -1*as.numeric(absdays), as.numeric(absdays))) %>% 
+  group_by(race, pre_post, days) %>% 
+  summarize(p_mups = mean(.fitted))
+
+ggplot(mean_pred_mups, aes(x = days, y = p_mups, 
+                           group = pre_post)) +
+  geom_point() +
+  geom_smooth(method = "lm", alpha = 1/10, color = "grey", aes(group = pre_post)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  # geom_errorbar(aes(ymin = p_mups - sd_mups, ymax = p_mups + sd_mups)) +
+  scale_y_continuous(limits = c(0,1)) + 
+  labs(x = "Days from Event", y = "Predicted Probability",
+       title = "Figure 1: Probability of MUPS Diagnoses") +
+  facet_wrap(~race) +
+  theme_minimal()
+
+### anx ----
+mean_pred_anx <- augment(model_anx, type.predict = "response", se_fit = TRUE)
+
+mean_pred_anx <- mean_pred_anx %>% 
+  mutate(days = ifelse(pre_post == "pre", -1*as.numeric(absdays), as.numeric(absdays))) %>% 
+  group_by(race, pre_post, days) %>% 
+  summarize(p_anx = mean(.fitted)) 
+
+ggplot(mean_pred_anx, aes(x = days, y = p_anx, 
+                          group = pre_post)) +
+  geom_point() +
+  geom_smooth(method = "lm", alpha = 1/10, color = "grey", aes(group = pre_post)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(0,.25)) + 
+  labs(x = "Days from Event", y = "Predicted Probability", title = "Figure 2: Probability of Anxiety/Depression Diagnosis") +
+  facet_wrap(~race) +
+  theme_minimal()
+
+```
+
+The change in the probability that Black patients in the UVA ED receive a diagnoses of MUPS after the events of August 11 and 12 evidences a clear and notable increase in the immediate aftermath of August 11 and 12 (Figure 1). The coefficient for the Post period is positive and statistically significant for MUPS (Table 1, column 1) indicating an increase in the probability that Black patients at UVA were experiencing these symptoms. This effect is absent among White patients, as indicated by the negative and significant coefficient on the interaction between race and period, offsetting the increase in probability seen among Black patients. The coefficient for White patients also indicates that prior to the August events, the probability of diagnoses of MUPS did not significantly differ from that for Black patients.
+
+There is no analagous effect for Anxiety/Depression, as seen in Figure 2. The likelihood that Black patients present to the UVA ED with symptons of anxiety or depression does not change signficantly after the August events as indicated by the non-significant coefficient for Post (Table 1, column 2). Among White patients, as well, there is no evidence of a significant change based on the small and nonsignificant coefficient for the interaction of race and period.
+
+Expanding on the above model, we estimated a similar model incorporating the logic of difference-in-difference design, comparing 2017 outcomes with adjacent years, 2016 and 2018, as a placebo. These results are in the SI Appendix. Consistent with predictions, this model revealed that, for MUPS, there was a positive and significant increase among Black patients in the post-8/12 period compared to the prior weeks in 2017, but no equivalent change in adjacent years. Among White patients, the trend is consistently flat across all years. In no year, is there any discernible shift in the likelihood of diagnoses of anxiety or depression.
+
+## Appendix Materials
+
+### Placebo: 2016/2018
+
+To keep the analysis simpler, we estimate the difference in 2017 and in adjacent years separately for Black patients and White patients. The key result is the difference in the post-period effect in 2017 for MUPS, in response to the August events, and the absence of a similar effect in the other years. 
+
+```{r did_prep}
+# among black patient 
+df_black <- allvisits %>% 
+  # keep only patients categorized as Black or White, only 2017
+  filter(race_clean %in% c("Black"),
+         sex %in% c("Female", "Male")) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(days = case_when(
+    adm_year == 2016 ~ adm_dtm - ymd(20160810),
+    adm_year == 2017 ~ adm_dtm - ymd(20170810),
+    adm_year == 2018 ~ adm_dtm - ymd(20180810)
+  ),
+  pre_post = ifelse(days >= 0, 
+                    "post", "pre"),
+  pre_post = factor(pre_post, levels = c("pre", "post")),
+  post = ifelse(days >= 0, 1, 0),
+  female = ifelse(sex == "Female", 1, 0),
+  absdays = abs(days),
+  weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                   "weekend", "weekday"),
+  day_of_week = wday(adm_dtm, label = TRUE),
+  year2017 = ifelse(adm_year == 2017, "2017", "2016 & 2018"),
+  year2017 = factor(year2017, levels = c("2017", "2016 & 2018"))
+  ) %>% 
+  # keep only cases within 2 weeks of 8/12
+  filter(absdays < 15)
+
+# among white patient 
+df_white <- allvisits %>% 
+  # keep only patients categorized as Black or White, only 2017
+  filter(race_clean %in% c("White"),
+         sex %in% c("Female", "Male")) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(days = case_when(
+    adm_year == 2016 ~ adm_dtm - ymd(20160810),
+    adm_year == 2017 ~ adm_dtm - ymd(20170810),
+    adm_year == 2018 ~ adm_dtm - ymd(20180810)
+  ),
+  pre_post = ifelse(days >= 0, 
+                    "post", "pre"),
+  pre_post = factor(pre_post, levels = c("pre", "post")),
+  post = ifelse(days >= 0, 1, 0),
+  female = ifelse(sex == "Female", 1, 0),
+  absdays = abs(days),
+  weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                   "weekend", "weekday"),
+  day_of_week = wday(adm_dtm, label = TRUE),
+  year2017 = ifelse(adm_year == 2017, "2017", "2016 & 2018"),
+  year2017 = factor(year2017, levels = c("2017", "2016 & 2018"))
+  ) %>% 
+  # keep only cases within 2 weeks of 8/12
+  filter(absdays < 15)
+
+```
+
+```{r did_analysis_mups}
+#### mups ----
+model2_mups_black <- 
+  glm(mups1 ~ age_at_event + sex + day_of_week + 
+        year2017*pre_post*absdays, 
+      family = "binomial", data = df_black)
+
+model2_mups_white <- 
+  glm(mups1 ~ age_at_event + sex + day_of_week + 
+        year2017*pre_post*absdays, 
+      family = "binomial", data = df_white)
+
+#### Table ----
+modelsummary(list("Black Patients" = model2_mups_black, "White Patients" = model2_mups_white),
+             stars = TRUE,
+             coef_map = c("(Intercept)" = "Intercept",
+                          "pre_postpost" = "Post 8/11 (2017)",
+                          "absdays" = "Days post 8/11 (2017)",
+                          "pre_postpost:absdays" = "Post 8/11 x Days post 8/11 (2017)",
+                          "year20172016 & 2018" = "2016 & 2018",
+                          "year20172016 & 2018:pre_postpost" = "Post 8/11 (2016 & 2018)",
+                          "year20172016 & 2018:absdsays" = "Days post 8/11 (2016 & 2018)",
+                          "year20172016 & 2018:pre_postpost:absdays" = "Post 8/11 x Days Post 8/11 (2016 & 2018)"),
+             gof_map = c("nobs", "logLik"),
+             title = "Table A.1: MUPS")
+
+#### Visualize ----
+mean_pred2_mups <- augment(model2_mups_black, type.predict = "response", se_fit = TRUE)
+
+mean_pred2_mups <- mean_pred2_mups %>% 
+  mutate(days = ifelse(pre_post == "pre", -1*as.numeric(absdays), as.numeric(absdays))) %>% 
+  group_by(year2017, pre_post, days) %>% 
+  summarize(p_mups = mean(.fitted)) 
+
+pp_mups_black <- ggplot(mean_pred2_mups, aes(x = days, y = p_mups, 
+                            group = pre_post)) +
+  geom_point() +
+  geom_smooth(method = "lm", alpha = 1/10, color = "grey", aes(group = pre_post)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(0,1)) + 
+  labs(x = "Days from Event", y = "Predicted Probability") +
+  facet_wrap(~year2017) +
+  labs(title = "MUPS Diagnoses: Black Patients") +
+  theme_minimal()
+
+mean_pred2_mups <- augment(model2_mups_white, type.predict = "response", se_fit = TRUE)
+
+mean_pred2_mups <- mean_pred2_mups %>% 
+  mutate(days = ifelse(pre_post == "pre", -1*as.numeric(absdays), as.numeric(absdays))) %>% 
+  group_by(year2017, pre_post, days) %>% 
+  summarize(p_mups = mean(.fitted)) 
+
+pp_mups_white <- ggplot(mean_pred2_mups, aes(x = days, y = p_mups, 
+                            group = pre_post)) +
+  geom_point() +
+  geom_smooth(method = "lm", alpha = 1/10, color = "grey", aes(group = pre_post)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(0,1)) + 
+  labs(x = "Days from Event", y = "Predicted Probability") +
+  facet_wrap(~year2017) +
+  labs(title = "MUPS Diagnoses: White Patients") +
+  theme_minimal()
+
+pp_mups_black / pp_mups_white
+```
+
+```{r did_analysis_anx}
+#### anx/dep ----
+model2_anx2_black <- 
+  glm(anx_dep ~ age_at_event + sex + day_of_week + 
+        year2017*pre_post*absdays, 
+      family = "binomial", data = df_black)
+
+model2_anx2_white <- 
+  glm(anx_dep ~ age_at_event + sex + day_of_week + 
+        year2017*pre_post*absdays, 
+      family = "binomial", data = df_white)
+
+#### Table ----
+modelsummary(list("Black Patients" = model2_anx2_black, "White Patients" = model2_anx2_white),
+             stars = TRUE,
+             coef_map = c("(Intercept)" = "Intercept",
+                          "pre_postpost" = "Post 8/11 (2017)",
+                          "absdays" = "Days post 8/11 (2017)",
+                          "pre_postpost:absdays" = "Post 8/11 x Days post 8/11 (2017)",
+                          "year20172016 & 2018" = "2016 & 2018",
+                          "year20172016 & 2018:pre_postpost" = "Post 8/11 (2016 & 2018)",
+                          "year20172016 & 2018:absdsays" = "Days post 8/11 (2016 & 2018)",
+                          "year20172016 & 2018:pre_postpost:absdays" = "Post 8/11 x Days Post 8/11 (2016 & 2018)"),
+             gof_map = c("nobs", "logLik"),
+             title = "Table A.2: Anxiety/Depression")
+
+
+#### Visualize ----
+mean_pred2_mups <- augment(model2_anx2_black, type.predict = "response", se_fit = TRUE)
+
+mean_pred2_mups <- mean_pred2_mups %>% 
+  mutate(days = ifelse(pre_post == "pre", -1*as.numeric(absdays), as.numeric(absdays))) %>% 
+  group_by(year2017, pre_post, days) %>% 
+  summarize(p_mups = mean(.fitted)) 
+
+pp_anx_black <- ggplot(mean_pred2_mups, aes(x = days, y = p_mups, 
+                            group = pre_post)) +
+  geom_point() +
+  geom_smooth(method = "lm", alpha = 1/10, color = "grey", aes(group = pre_post)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(0,0.25)) + 
+  labs(x = "Days from Event", y = "Predicted Probability") +
+  facet_wrap(~year2017) +
+  labs(title = "Anxiety/Depression Diagnoses: Black Patients") +
+  theme_minimal()
+
+mean_pred2_mups <- augment(model2_anx2_white, type.predict = "response", se_fit = TRUE)
+
+mean_pred2_mups <- mean_pred2_mups %>% 
+  mutate(days = ifelse(pre_post == "pre", -1*as.numeric(absdays), as.numeric(absdays))) %>% 
+  group_by(year2017, pre_post, days) %>% 
+  summarize(p_mups = mean(.fitted)) 
+
+pp_anx_white <- ggplot(mean_pred2_mups, aes(x = days, y = p_mups, 
+                            group = pre_post)) +
+  geom_point() +
+  geom_smooth(method = "lm", alpha = 1/10, color = "grey", aes(group = pre_post)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  scale_y_continuous(limits = c(0,0.25)) + 
+  labs(x = "Days from Event", y = "Predicted Probability") +
+  facet_wrap(~year2017) +
+  labs(title = "Anxiety/Depression Diagnoses: White Patients") +
+  theme_minimal()
+
+pp_anx_black / pp_anx_white
+```
+
+
+### Impact of analysis window
+
+We repeated the analysis for 2017 using a one-week and a three-week window around the events. For all spans around the events, we see consistent results.
+
+```{r window_width}
+ ### repeat for 1 week in 2017 ----
+df_2017_aug10_1week <- allvisits %>% 
+  # keep only patients categorized as Black or White, only 2017
+  filter(race_clean %in% c("Black", "White"),
+         sex %in% c("Female", "Male"),
+         adm_year == 2017) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(black = ifelse(race_clean == "Black", 1, 0),
+         race = factor(race_clean, levels = c("Black", "White"), labels = c("Black Patients", "White Patients")),
+         days = adm_dtm - ymd(20170810),
+         pre_post = ifelse(days >= 0, "post", "pre"),
+         pre_post = factor(pre_post, levels = c("pre", "post")),
+         post = ifelse(days >= 0, 1,0),
+         absdays = abs(days),
+         female = ifelse(sex == "Female", 1, 0),
+         weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                          1,0),
+         day_of_week = wday(adm_dtm, label = TRUE)
+  ) %>% 
+  # keep only cases within 2 weeks of 8/(11/12)
+  filter(absdays < 8) 
+
+### repeat for 3 weeks in 2017 ----
+df_2017_aug10_3week <- allvisits %>% 
+  # keep only patients categorized as Black or White, only 2017
+  filter(race_clean %in% c("Black", "White"),
+         sex %in% c("Female", "Male"),
+         adm_year == 2017) %>% 
+  # reorder race, create number of days since 8/12, create weekend flag
+  mutate(black = ifelse(race_clean == "Black", 1, 0),
+         race = factor(race_clean, levels = c("Black", "White"), labels = c("Black Patients", "White Patients")),
+         days = adm_dtm - ymd(20170810),
+         pre_post = ifelse(days >= 0, "post", "pre"),
+         pre_post = factor(pre_post, levels = c("pre", "post")),
+         post = ifelse(days >= 0, 1,0),
+         absdays = abs(days),
+         female = ifelse(sex == "Female", 1, 0),
+         weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                          1,0),
+         day_of_week = wday(adm_dtm, label = TRUE)
+  ) %>% 
+  # keep only cases within 2 weeks of 8/(11/12)
+  filter(absdays < 22) 
+
+model_mups2_1week <- 
+  glm(mups1 ~ age_at_event + sex + day_of_week + 
+        race*pre_post*absdays, 
+      family = "binomial", data = df_2017_aug10_1week)
+
+model_mups2_3week <- 
+  glm(mups1 ~ age_at_event + sex + day_of_week + 
+        race*pre_post*absdays, 
+      family = "binomial", data = df_2017_aug10_3week)
+
+modelsummary(list("2 Weeks" = model_mups, 
+                  "1 Week" = model_mups2_1week,
+                  "3 Weeks" = model_mups2_3week),
+             stars = TRUE,
+             coef_map = c("(Intercept)" = "Intercept",
+                          "pre_postpost" = "Post",
+                          "raceWhite Patients" = "White patients",
+                          "absdays" = "Days",
+                          "raceWhite Patients:pre_postpost" = "White patients x Post",
+                          "pre_postpost:absdays" = "Post x Days",
+                          "raceWhite Patients:absdsays" = "White patients x Days",
+                          "raceWhite Patients:pre_postpost:absdays" = "White patients x Post x Days"),
+             gof_map = c("nobs", "logLik"))
+
+```
+
+### Day-level visual
+The figure below shows the overall proportion of the targeted diagnoses by race among patients presenting to the UVA ED in the weeks before and after the August 11 and 12 events. The two-week period used in our analysis is shown by the shaded region.
+
+```{r daylevel_prep}
+daily_2017 <- allvisits %>% 
+  mutate(diag = ifelse(anx == 1 | mups1 == 1,
+                       1, 0)) %>% 
+  filter(race_clean %in% c("Black", "White")) %>% 
+  group_by(adm_dtm, race_clean) %>% 
+  summarize(num_visits = n(),
+            num_diag = sum(diag),
+            num_mups = sum(mups1),
+            num_anx = sum(anx),
+            per_diag = (num_diag/num_visits)*100) %>% 
+  filter(between(adm_dtm, ymd(20170701), ymd(20170930))) %>% # original 5/14 to 11/11
+  mutate(race = factor(race_clean, levels = c("Black", "White"), labels = c("Black Patients", "White Patients")),
+         postweek = case_when(
+           adm_dtm < ymd(20170812) ~ "pre",
+           adm_dtm > ymd(20170825) ~ "postlater",
+           TRUE ~ "post2weeks"
+         ),
+         postweek = as.factor(postweek),
+         post = ifelse(postweek == "pre", "pre", "post"),
+         post = as.factor(post),
+         weekend = ifelse(wday(adm_dtm, week_start = 1) >= 6,
+                          "weekend", "weekday"))
+
+## Visual ----
+# both diagnoses
+ann_text <- data.frame(adm_dtm = c(as.Date("2017-08-09"), as.Date("2017-08-11")),
+                       per_diag = c(50, 0), 
+                       race = factor("Black Patients"))
+
+daily_2017 %>% 
+  ggplot(aes(x = adm_dtm, y = per_diag, group = 1)) +
+  geom_rect(xmin = as.Date("2017-08-10"), xmax = as.Date("2017-08-25"),
+            ymin = -Inf, ymax = Inf, fill = "grey90") +
+  geom_line(color = "grey50") +
+  # geom_smooth(span = 0.1, se = FALSE, color = "black") +
+  # geom_vline(xintercept = as.Date("2017-08-11"), linetype = "dashed") +
+  # geom_text(data = ann_text, label = c("August 11", "2 weeks post"),
+  #           size = 2, hjust = c(1, 0)) +
+  facet_wrap(~race, ncol = 1) +
+  labs(title = "Percent of Visits with Diagnoses of MUPS, Anxiety/Depression",
+       x = "Date", y = "Percent of Visits") +
+  theme_minimal()
+```

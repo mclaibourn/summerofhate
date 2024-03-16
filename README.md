@@ -1,5 +1,6 @@
 Analysis for The Health Impact of The Summer of Hate on Charlottesville, Virginia
 
+## code
 Primary Analysis 
 
 * individual_analysis.R: primary analysis in paper, supplemental analysis in appendix
@@ -11,3 +12,6 @@ Exploratory Analysis
 * explore.R: understanding the data
 * replicate.R and replicate2.R: ensuring we can reproduce the initial analysis form diss chapter
 * replicate.Rmd and replicate.html: sharing replication results and additional questions with team 
+
+## tables_figures
+Tables and figures for inclusion in paper
